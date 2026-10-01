@@ -1,0 +1,35 @@
+# ============ 看番陪看 Agent 配置 ============
+# 混合部署：DeepSeek 管「看 + 读」（便宜主力），DashScope 只管「听」（语音识别）。
+#
+# 两个 key 建议分别放进环境变量：
+#   DEEPSEEK_API_KEY  —— 去 https://platform.deepseek.com 申请
+#   DASHSCOPE_API_KEY —— 去 https://bailian.console.aliyun.com 申请
+# （也可以直接把下面注释掉的 api_key 行打开填进去）
+
+anime: "未命名番剧"
+
+paths:
+  subtitles: "subtitles"
+  archive: "archive"
+
+# ---- 文本 + 视觉：DeepSeek Flash（便宜，且自带 Vision）----
+llm:
+  base_url: "https://api.deepseek.com"   # OpenAI 兼容接口
+  api_key_env: "DEEPSEEK_API_KEY"
+  # api_key: "sk-你的deepseek-key"
+  model: "deepseek-flash"    # 文本和视觉都用它（deepseek-flash 支持 Vision）
+  thinking: false            # 关思考模式省钱；想要更强推理再改 true
+
+# ---- 语音识别：DashScope Paraformer（DeepSeek 没有 ASR）----
+asr:
+  base_url: "https://dashscope.aliyuncs.com"
+  api_key_env: "DASHSCOPE_API_KEY"
+  # api_key: "sk-你的dashscope-key"
+  model: "paraformer-v2"
+  language_hints: ["zh", "en"]
+
+# ---- 字幕自动下载：伪射手 assrt.net（可选，个人免费）----
+subtitle:
+  api_base: "https://api.assrt.net"
+  api_key_env: "ASSRT_TOKEN"    # 去 assrt.net 注册后在「用户面板」拿 token
+  # api_key: "你的32位token"

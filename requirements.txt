@@ -1,0 +1,5 @@
+openai>=1.0
+requests
+pyyaml
+numpy          # voice_ask.py 录音用
+sounddevice    # voice_ask.py 录音用（pip 会自动带上 PortAudio）

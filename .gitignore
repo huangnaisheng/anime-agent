@@ -1,0 +1,25 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# ---- 密钥 / 环境变量（绝不入库）----
+.env
+*.key
+config.local.yaml
+
+# ---- 字幕与剧情档案（第三方版权 + 衍生数据，不入库）----
+subtitles/
+archive/
+
+# ---- 本地录音 / 音频 ----
+*.mp3
+*.wav
+*.flac
+*.m4a
+
+# ---- 系统垃圾 ----
+.DS_Store
+Thumbs.db
