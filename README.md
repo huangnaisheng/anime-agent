@@ -1,161 +1,147 @@
-# 看番陪看 Agent
+# anime-agent
 
-一个陪你追番的小助手：**暂停时问它「这个角色之前出现过吗 / 他之前啥故事」，它只根据你已经看到的那一集为止回答，绝不剧透。**
+一个面向追番场景的问答 Agent：基于已观看集数的字幕/台词构建逐集剧情索引，回答「某角色此前是否出现、此前发生了什么」类问题。所有回答严格限制在用户当前进度（第 1～N 集）之内，超出部分不进入模型上下文。
 
-底层混合部署（省钱优先）：
-- **文本 + 视觉**：DeepSeek Flash（`deepseek-flash`，便宜且自带 Vision）
-- **语音识别**：DashScope Paraformer（`paraformer-v2`，DeepSeek 没有 ASR）
+## 技术栈
 
----
+| 组件 | 实现 | 说明 |
+|---|---|---|
+| 文本 / 视觉推理 | DeepSeek Flash（`deepseek-flash`） | OpenAI 兼容接口，支持视觉输入 |
+| 语音识别（ASR） | DashScope Paraformer（`paraformer-v2`） | 录音文件识别 |
+| 字幕检索 | assrt.net（伪射手）API | 可选，用于自动下载 |
+
+采用低成本混合部署：文本与视觉推理全部走 DeepSeek，DashScope 仅承担 ASR（DeepSeek 不提供 ASR 能力）。
+
+## 功能
+
+- 字幕解析（`.srt` / `.ass`）→ 逐集生成剧情摘要与角色表
+- 进度感知问答：仅加载第 1～N 集档案，后续内容不可见
+- 视觉识别：传入画面截图，结合外观回答角色相关问题
+- 语音识别：本地音频文件或公网 URL → 文本
+- 语音提问：录音 → 识别 → 问答
+- 字幕自动下载：assrt.net 检索、评分、下载、解压
+- 离线自检：无网络、无 API 调用，验证核心逻辑
 
 ## 目录结构
 
 ```
 anime-agent/
-├── start.py            # 一键启动：问看哪部番 → 自动下字幕 → 建档案 → 问答
-├── fetch_subtitles.py  # 自动搜 + 下载字幕（伪射手 assrt.net）
-├── build_archive.py    # 离线：字幕/台词 → 每集「剧情摘要 + 角色表」档案
-├── ask.py              # 在线：暂停时提问（不剧透）
-├── transcribe.py       # 语音识别（本地音频 / URL → 文字）
-├── voice_ask.py        # 语音提问（录音 → 识别 → 不剧透回答）
-├── api_client.py       # LLM（DeepSeek）封装：文本 + 视觉
-├── config.yaml         # 配置（填 key、选模型）
+├── start.py            # 入口：交互式选择番剧与集数，串联下载 / 建档 / 问答
+├── fetch_subtitles.py  # 字幕检索与下载（assrt.net）
+├── build_archive.py    # 字幕 → 逐集档案（摘要 + 角色表）
+├── ask.py              # 进度感知问答（不剧透）
+├── transcribe.py       # ASR：本地文件 / URL → 文本
+├── voice_ask.py        # 语音提问（录音 → 识别 → 问答）
+├── api_client.py       # DeepSeek 客户端封装（文本 + 视觉）
+├── config.yaml         # 配置
+├── selftest.py         # 离线自检
 ├── requirements.txt
-├── subtitles/<番名>/   # 按番分文件夹放字幕
-└── archive/<番名>/     # 按番分文件夹存档案
+├── subtitles/<番名>/   # 字幕，按番剧分目录
+└── archive/<番名>/     # 档案，按番剧分目录
 ```
 
----
-
-## 一、安装
+## 安装
 
 ```powershell
-cd D:\Study\anime-agent
 pip install -r requirements.txt
 ```
 
-## 二、拿两个 API Key
+语音提问（`voice_ask.py`）额外依赖 `sounddevice`，且需要麦克风。
 
-这个项目用两家服务，各需要一个 key：
+## 配置
 
-1. **DeepSeek**（文本 + 看图）：https://platform.deepseek.com → 创建 key
-2. **DashScope 通义千问**（语音识别）：https://bailian.console.aliyun.com → 创建 key
+三组凭证，通过环境变量或 `config.yaml` 提供：
 
-把两个 key 写进环境变量（推荐）：
+| 服务 | 用途 | 环境变量 | 申请地址 |
+|---|---|---|---|
+| DeepSeek | 文本 + 视觉 | `DEEPSEEK_API_KEY` | https://platform.deepseek.com |
+| DashScope | 语音识别 | `DASHSCOPE_API_KEY` | https://bailian.console.aliyun.com |
+| assrt.net | 字幕检索（可选） | `ASSRT_TOKEN` | https://assrt.net |
+
+环境变量方式（推荐）：
 
 ```powershell
-setx DEEPSEEK_API_KEY "sk-你的deepseek-key"
-setx DASHSCOPE_API_KEY "sk-你的dashscope-key"
-# 设完重启终端才生效
+setx DEEPSEEK_API_KEY "sk-..."
+setx DASHSCOPE_API_KEY "sk-..."
+setx ASSRT_TOKEN "..."
+# 重新打开终端后生效
 ```
 
-或者直接编辑 `config.yaml`，在 `llm` 和 `asr` 两段里分别填 `api_key`。
+也可在 `config.yaml` 对应段填写 `api_key` 字段。模型与参数（如 `llm.model`、`llm.thinking`、`asr.language_hints`）均可在配置文件中调整。
 
----
+## 使用
 
-## 三、三步跑起来（阶段一：核心链路）
-
-### 0. 先自检（不联网、不花 API 钱）
+### 1. 离线自检
 
 ```powershell
 python selftest.py
 ```
 
-它会用一个假模型把「解析 → 建档案 → 汇总 → 不剧透问答」整条链路跑一遍，验证解析器、剧透锁、提示词组装这些纯逻辑部分对不对。全绿再往下走。
+以 mock 客户端验证解析、建档、不剧透锁定、提示词组装等纯逻辑，不产生 API 费用。
 
-### 1. 准备字幕
+### 2. 准备字幕
 
-把每一集的字幕文件放进 `subtitles/` 文件夹，命名成 `EP01.ass`、`EP02.ass`……（`.srt` 也行）。
+将各集字幕放入 `subtitles/`（或 `subtitles/<番名>/`），命名为 `EP01.ass`、`EP02.ass`（`.srt` 亦可）。若无现成字幕，可录制音频后经 `transcribe.py` 转为文本。
 
-> 拿不到字幕？B站是硬字幕/DRM，网上通常能搜到现成外挂字幕（伪射手 assrt.net、字幕库、SubHD、动漫花园）。
-> 实在没有，就录下音频走 `transcribe.py` 转成文字（见下面「语音识别」）。
-
-### 2. 生成剧情档案
+### 3. 构建档案
 
 ```powershell
-python build_archive.py subtitles
+python build_archive.py subtitles --anime <番名>
 ```
 
-它会逐集调用 LLM，生成 `archive/EP01.json`、`EP02.json`……每份里是「剧情摘要 + 本集出场角色表」。
+逐集调用 LLM，生成 `archive/<番名>/EP01.json`（剧情摘要 + 出场角色表）。
 
-### 3. 提问（不剧透）
+### 4. 提问
 
 ```powershell
-# 只知道长啥样 → 给截图让它认人
-python ask.py --episode 5 --image shot.png --question "这个红头发女生之前出现过吗"
+# 仅知外观：传入截图
+python ask.py --episode 5 --image shot.png --question "这个红发角色此前是否出现" --anime <番名>
 
-# 知道名字 → 直接问
-python ask.py --episode 5 --character 鸣人 --question "鸣人前面经历了什么"
+# 已知角色名：直接提问
+python ask.py --episode 5 --character <角色名> --question "该角色此前经历" --anime <番名>
 ```
 
-它会**只检索第 1~5 集**的档案来回答，后面的剧情它碰都不碰。
+仅检索第 1～N 集档案。
 
----
-
-## 四、语音识别（阶段二）
-
-`transcribe.py` 用的是 Paraformer 录音文件识别。**现在直接喂本地文件就行**——它会自动把文件上传到 DashScope 的临时存储（免费，48 小时有效），再识别，不用你搭 OSS。
+### 5. 语音识别
 
 ```powershell
-# 本地音频文件（自动上传）
-python transcribe.py EP01.mp3 --out 台词.txt
+# 本地音频（自动上传至 DashScope 临时存储，48 小时有效）
+python transcribe.py EP01.mp3 --out lines.txt
 
-# 也支持直接给公网 URL
-python transcribe.py https://你的音频地址.mp3 --out 台词.txt
+# 公网 URL
+python transcribe.py https://.../audio.mp3 --out lines.txt
 ```
 
-两种用法：
-
-1. **番剧音频 → 台词**：转出来的文字，当字幕一样喂给 `build_archive.py` 建档案。
-2. **你的语音 → 问题**：直接跑 `voice_ask.py`，按住说话 → 自动转文字 → 不剧透回答。
+### 6. 语音提问
 
 ```powershell
-# 语音提问（需要麦克风 + pip install sounddevice numpy）
 python voice_ask.py --episode 5
 ```
 
-> 进阶提示：Paraformer 支持 `diarization_enabled: true`（区分不同说话人）、`language_hints: ["ja"]`（日语番），都在这份脚本的 `parameters` 里改。
+番名取自 `config.yaml` 的 `anime` 字段。
 
----
-
-## 五、不剧透是怎么做到的（三道锁）
-
-1. **数据层**：`ask.py` 只加载 `EP01` 到 `EP{当前集}` 的档案，后面的根本进不了它的视野；
-2. **提示词层**：系统提示写死"你的世界截止到第 N 集，只准用档案，禁止补充、禁止暗示"；
-3. **对抗模型自带剧透**：提示词里强约束"禁止调用你自己的记忆"。对火出圈的番，模型可能背过剧情，这是已知难点，后续可以再收紧。
-
----
-
-## 六、一键启动 + 自动下字幕
-
-`start.py` 把流程串起来：**上来先问你今天看哪部番、看到第几集**，本地没字幕就自动用伪射手（assrt.net）搜 + 下载，再建档案，最后进入问答。
+### 7. 一键启动
 
 ```powershell
 python start.py
 ```
 
-自动下字幕依赖 assrt 的 token（免费）：
+交互式输入番剧与当前集数；本地无字幕时自动经 assrt.net 检索下载，随后建档并进入问答。
 
-1. 去 https://assrt.net 注册；
-2. 在「用户面板」复制 API Token；
-3. 填进 `config.yaml` 的 `subtitle.api_key`（或设环境变量 `ASSRT_TOKEN`）。
+## 不剧透机制
 
-也可以单独手动搜字幕：
+1. **数据层**：`ask.py` 仅加载 `EP01`～`EP{current}`，后续档案不进入模型上下文。
+2. **提示词层**：系统提示固定进度边界，仅允许使用档案内容回答。
+3. **模型记忆抑制**：提示词约束模型不使用自身训练记忆。对热门作品仍属已知难点。
 
-```powershell
-python fetch_subtitles.py "葬送的芙莉莲" --anime 芙莉莲
-```
+## 已知限制
 
-下载后按番名分文件夹存放：`subtitles/<番名>/`、`archive/<番名>/`，今天看 A、明天看 B 互不干扰。
+- 字幕自动下载依赖 assrt.net 覆盖范围，国漫、冷门或新番可能无结果，需手动放置字幕。
+- `.rar` 字幕包需手动解压。
+- 模型对热门作品的先验知识可能造成剧透，需进一步约束。
 
-> 说明：自动下载是"尽力而为"——assrt 上没有的番（尤其国漫/冷门/新番）会退回让你手动放字幕。字幕资源由 assrt.net 提供。
+## Roadmap
 
----
-
-## 七、下一步（待做）
-
-- [x] 本地音频上传（已完成：`transcribe.py` 自动上传临时存储，无需 OSS）
-- [x] 语音提问（已完成：`voice_ask.py`，录音 → ASR → ask 自动串起来）
-- [x] 自动下字幕 + 一键启动（`fetch_subtitles.py` + `start.py`）
-- [ ] 按角色做索引/向量检索（集数多了以后更快更准）
-- [ ] 网页界面
+- [ ] 角色级索引 / 向量检索（集数增多后提升精度与速度）
+- [ ] Web 界面
